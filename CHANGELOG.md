@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-06-12
+
+### 🎯 Highlights
+
+实现真正的**单包发布** / Implemented true **single-package publishing**
+
+调研编辑器 LuaAPI 声明文件（`CS_FairyEditor_*.lua`）确认：`FProject`/`FPackage`/`App` 均无 `Publish` 方法，正确入口是 `CS.FairyEditor.PublishHandler(pkg, activeBranch):Run()`（直接构造，xLua 未暴露 `.New` 静态方法）。此前 `tryPublishViaAPI` 尝试的 5 个 API 全部不存在，fallback 到工具栏 `tbPublish` **全量发布**——这是 `publish_package` 误发所有包的根因。
+
+Investigation of the editor LuaAPI declaration files (`CS_FairyEditor_*.lua`) confirmed that `FProject`/`FPackage`/`App` expose no `Publish` method; the correct entry point is `CS.FairyEditor.PublishHandler(pkg, activeBranch):Run()` (direct construction — xLua exposes no `.New` static method). The previous `tryPublishViaAPI` tried 5 nonexistent APIs, always falling back to the toolbar `tbPublish` **full publish** — the root cause of `publish_package` mistakenly publishing every package.
+
+### Changed
+
+- **`fg_editor_publish_package`** — 重写为 PublishHandler 单包发布优先 + 工具栏 fallback；删除 `tryPublishViaAPI` 死代码（`App.project:Publish` 等 5 个 API 均不存在）；返回 `method=PublishHandler`；docstring 去掉"无法单独发布"过时描述。
+  Rewritten to prefer PublishHandler single-package publish with toolbar fallback; removed `tryPublishViaAPI` dead code (5 APIs like `App.project:Publish` do not exist); returns `method=PublishHandler`; docstring drops the outdated "cannot publish a single package" note.
+- **`fg_editor_publish_all`** — 简化为直接工具栏全量发布，删除 `tryPublishViaAPI` 调用。
+  Simplified to direct toolbar full publish, removed `tryPublishViaAPI` call.
+- **Python 发布后激活** — 删除 `publish_package`/`publish_all` 发布后的 `ensure_editor_active()`。`runInBackground` 已由 Lua 侧双重保障（`main.lua` poll 每 0.1s 重置 + `command_handler` 每个命令结束重置），Python 激活属冗余。
+  Removed `ensure_editor_active()` after publish in `publish_package`/`publish_all`. `runInBackground` is already double-secured on the Lua side (`main.lua` poll resets every 0.1s + `command_handler` resets after each command), making the Python activation redundant.
+
+### Fixed
+
+- **`publish_package` 误全量发布** — `tryPublishViaAPI` 的 5 个 API 全不存在，fallback toolbar 全发。改用 `PublishHandler` 后仅发布目标包（验证：`publish_package("Army")` 后仅 `Army_fui.bytes` 更新，其余 17 个包 mtime 不变）。
+  `publish_package` mistakenly published all packages — all 5 APIs in `tryPublishViaAPI` were nonexistent, falling back to toolbar full publish. With `PublishHandler`, only the target package is published (verified: after `publish_package("Army")`, only `Army_fui.bytes` was updated; the other 17 packages were untouched).
+
+### Internal
+
+- 通过 LuaAPI 声明文件定位 API（xLua 反射 `GetType():GetMethods()` 枚举不到方法，不可用）。
+  API located via the LuaAPI declaration files (xLua reflection `GetType():GetMethods()` fails to enumerate methods and is unusable).
+
+### Notes
+
+- `PublishHandler.Run()` 异步（返回 Task），`handler.isSuccess` 在命令返回时尚未更新（不可靠），判断发布完成看 `exportPath/{pkg}_fui.bytes` 的 mtime。
+- `PublishHandler.Run()` is async (returns a Task); `handler.isSuccess` is not yet updated when the command returns (unreliable) — check the mtime of `exportPath/{pkg}_fui.bytes` to confirm completion.
+
+---
+
 ## [Unreleased] - 2026-05-22
 
 ### 🎯 Highlights

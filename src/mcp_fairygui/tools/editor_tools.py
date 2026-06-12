@@ -539,9 +539,9 @@ def register(mcp: FastMCP, bridge_path: Path):
     def fg_editor_publish_package(package_name: str) -> str:
         """发布指定的 UI 包
 
-        将指定的 FairyGUI UI 包发布到 Unity 项目。
+        通过 PublishHandler 单包发布 API 将指定的 FairyGUI UI 包发布到 Unity 项目。
         发布路径由 FairyGUI 项目设置中的全局发布设置决定。
-        注意：FairyGUI 发布按钮会发布所有包，无法单独发布指定包。
+        若单包 API 不可用，则回退到工具栏按钮（会发布所有包）。
 
         Args:
             package_name: 要发布的包名称
@@ -556,8 +556,6 @@ def register(mcp: FastMCP, bridge_path: Path):
         if result.get("status") == "success":
             data = result.get("data", {})
             if data.get("published"):
-                # 发布后激活编辑器窗口（防止 runInBackground 被覆盖导致通信中断）
-                ensure_editor_active()
                 msg = f"发布已触发: {data.get('package', package_name)}\n路径: {data.get('path', 'N/A')}\n方法: {data.get('method', 'unknown')}"
                 if data.get("warning"):
                     msg += f"\n警告: {data['warning']}"
@@ -585,13 +583,9 @@ def register(mcp: FastMCP, bridge_path: Path):
             total = data.get("total", 0)
             published = data.get("published", 0)
             failed = data.get("failed", 0)
-            path = data.get("path", "N/A")
 
             if published > 0:
-                # 发布后激活编辑器窗口（防止 runInBackground 被覆盖导致通信中断）
-                ensure_editor_active()
                 lines = [f"发布已触发: {published}/{total} 个包"]
-                lines.append(f"发布路径: {path}")
                 lines.append(f"方法: {data.get('method', 'unknown')}")
 
                 lines.append(f"\n涉及的包:")

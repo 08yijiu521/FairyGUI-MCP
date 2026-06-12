@@ -2191,24 +2191,29 @@ end
 
 -- ========== 发布命令 ==========
 
--- 内部函数：尝试通过直接 API 发布
-local function tryPublishViaAPI(pkgNames)
-    local ok1, _ = pcall(function() App.project:Publish() end)
-    if ok1 then return true, "project:Publish()" end
-
-    local ok2, _ = pcall(function() App:Publish() end)
-    if ok2 then return true, "App:Publish()" end
-
-    local ok3, _ = pcall(function() App:DoPublish() end)
-    if ok3 then return true, "App:DoPublish()" end
-
-    local ok4, _ = pcall(function() App:Export() end)
-    if ok4 then return true, "App:Export()" end
-
-    local ok5, _ = pcall(function() App.project:Export() end)
-    if ok5 then return true, "project:Export()" end
-
-    return false, "no direct API found"
+-- 内部函数：通过 PublishHandler 单包发布（FairyGUI 编辑器的正确单包发布 API）
+-- 关键：xLua 未暴露 PublishHandler.New 静态方法，必须直接构造 CS.FairyEditor.PublishHandler(pkg, branch)
+-- branch 取 App.project.activeBranch（无分支时为空字符串）；Run 异步触发，产物秒级写入，
+-- isSuccess 字段返回时尚未更新（不可靠），判完成需看 exportPath 下 {pkg}_fui.bytes 的 mtime
+local function tryPublishViaHandler(pkgName)
+    local pkg = nil
+    local getPkgOk = pcall(function() pkg = App.project:GetPackageByName(pkgName) end)
+    if not getPkgOk or not pkg then
+        return false, "package not found: " .. tostring(pkgName)
+    end
+    local handler
+    local branch = App.project.activeBranch or ""
+    local newOk = pcall(function()
+        handler = CS.FairyEditor.PublishHandler(pkg, branch)
+    end)
+    if not newOk or not handler then
+        return false, "PublishHandler construct failed"
+    end
+    local runOk = pcall(function() handler:Run() end)
+    if not runOk then
+        return false, "PublishHandler.Run failed"
+    end
+    return true, "PublishHandler", handler.exportPath or ""
 end
 
 -- 内部函数：尝试通过工具栏按钮点击发布
@@ -2340,48 +2345,35 @@ function CommandHandler.handlePublishPackage(params, bridgePath)
     local pkgName = params.package_name
     if not pkgName then error("缺少参数: package_name") end
 
-    local pkg = App.project:GetPackageByName(pkgName)
-    if not pkg then error("包不存在: " .. pkgName) end
-
-    local globalSettings = App.project:GetSettings("Publish")
-    local exportPath = "unknown"
-    pcall(function() exportPath = globalSettings and globalSettings.path or "" end)
-
-    local apiOk, apiMethod = tryPublishViaAPI({pkgName})
-    if apiOk then
+    -- 优先用 PublishHandler 单包发布（正确 API，只发布目标包）
+    local handlerOk, handlerMethod, exportPath = tryPublishViaHandler(pkgName)
+    if handlerOk then
         return {
-            published = true, package = pkgName, path = exportPath, method = apiMethod,
-            message = string.format("已触发发布（包 '%s' 存在，路径: %s）", pkgName, exportPath),
-            warning = "发布按钮会发布所有包，无法单独发布指定包"
+            published = true, package = pkgName, path = exportPath, method = handlerMethod,
+            message = string.format("已发布包 '%s'（单包发布，路径: %s）", pkgName, exportPath)
         }
     end
 
+    -- fallback：工具栏按钮（会发布所有包，仅在单包 API 失败时使用）
     local toolbarOk, toolbarMethod = tryPublishViaToolbar()
     if toolbarOk then
-        -- 发布后激活编辑器窗口（临时方案，防止 runInBackground 被覆盖）
-        CS.UnityEngine.Application.runInBackground = true
         return {
-            published = true, package = pkgName, path = exportPath, method = toolbarMethod,
-            message = string.format("已触发发布（包 '%s' 存在，路径: %s）", pkgName, exportPath),
-            warning = "发布按钮会发布所有包，无法单独发布指定包"
+            published = true, package = pkgName, method = toolbarMethod,
+            warning = "单包发布 API 失败，回退到工具栏全量发布",
+            message = string.format("已触发发布（回退全量，单包失败原因: %s）", handlerMethod)
         }
     end
 
     return {
-        published = false, package = pkgName, path = exportPath,
+        published = false, package = pkgName,
         reason = "no working publish method found",
-        api_tried = apiMethod, toolbar_tried = toolbarMethod,
-        message = "发布失败: 无法找到可用的发布方法"
+        handler_tried = handlerMethod, toolbar_tried = toolbarMethod,
+        message = "发布失败: 单包 API 与工具栏均失败"
     }
 end
 
--- 发布所有包
+-- 发布所有包（工具栏全量发布）
 function CommandHandler.handlePublishAll(params, bridgePath)
-    local globalSettings = nil
-    pcall(function() globalSettings = App.project:GetSettings("Publish") end)
-    local exportPath = "unknown"
-    pcall(function() exportPath = globalSettings and globalSettings.path or "" end)
-
     local allPackages = App.project.allPackages
     if not allPackages or allPackages.Count == 0 then error("项目中没有包") end
 
@@ -2391,35 +2383,24 @@ function CommandHandler.handlePublishAll(params, bridgePath)
         table.insert(packageNames, allPackages[i].name)
     end
 
-    -- 确保发布后保持后台运行
+    -- 确保发布后保持后台运行（main.lua poll 每 0.1s 也会持续重置，此处为发布瞬间保障）
     CS.UnityEngine.Application.runInBackground = true
-
-    local apiOk, apiMethod = tryPublishViaAPI(packageNames)
-    if apiOk then
-        return {
-            total = totalCount, published = totalCount, failed = 0,
-            packages = packageNames, path = exportPath, method = apiMethod,
-            message = string.format("已触发所有 %d 个包的发布（路径: %s）", totalCount, exportPath)
-        }
-    end
 
     local toolbarOk, toolbarMethod = tryPublishViaToolbar()
     if toolbarOk then
-        -- 发布后激活编辑器窗口（临时方案，防止 runInBackground 被覆盖）
-        CS.UnityEngine.Application.runInBackground = true
         return {
             total = totalCount, published = totalCount, failed = 0,
-            packages = packageNames, path = exportPath, method = toolbarMethod,
-            message = string.format("已触发所有 %d 个包的发布（路径: %s）", totalCount, exportPath)
+            packages = packageNames, method = toolbarMethod,
+            message = string.format("已触发所有 %d 个包的发布", totalCount)
         }
     end
 
     return {
         total = totalCount, published = 0, failed = totalCount,
-        packages = packageNames, path = exportPath,
+        packages = packageNames,
         reason = "no working publish method found",
-        api_tried = apiMethod, toolbar_tried = toolbarMethod,
-        message = "发布失败: 无法找到可用的发布方法"
+        toolbar_tried = toolbarMethod,
+        message = "发布失败: 工具栏发布按钮不可用"
     }
 end
 
